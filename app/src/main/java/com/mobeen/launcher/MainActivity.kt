@@ -79,8 +79,8 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("launcher", Context.MODE_PRIVATE)
 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(e1: MotionEvent?, e2: MotionEvent?, velocityX: Float, velocityY: Float): Boolean {
-                if (e1 == null || e2 == null) return false
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                if (e1 == null) return false
                 val dy = e1.y - e2.y
                 val dx = Math.abs(e1.x - e2.x)
                 if (dy > dp(100) && dy > dx * 1.5f && velocityY < -500f) {
