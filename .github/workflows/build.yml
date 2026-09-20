@@ -1,0 +1,81 @@
+name: Build Launcher APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set +e
+          gradle assembleRelease --no-daemon 2>&1 | tee build_output.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            python3 - <<'PY'
+          import re
+          log=open('build_output.log',errors='ignore').read().splitlines()
+          keep=[]
+          for i,l in enumerate(log):
+              if 'What went wrong' in l:
+                  keep.extend(x.strip() for x in log[i:i+5])
+              elif re.search(r'^e: |error:|Execution failed|Could not|Unresolved|cannot find symbol|FAILURE', l, re.I):
+                  keep.append(l.strip())
+          seen=set(); out=[]
+          for l in keep:
+              if l and l not in seen:
+                  seen.add(l); out.append(l)
+          out=out[:64]
+          for c in [out[i:i+8] for i in range(0,len(out),8)][:8]:
+              print('::error::'+'%0A'.join(x.replace('%','%25')[:400] for x in c))
+          PY
+            exit 1
+          fi
+
+      - name: Name the APK
+        run: cp app/build/outputs/apk/release/app-release.apk MobinLauncher.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobin-launcher-apk
+          path: MobinLauncher.apk
+
+      - name: Publish release (direct APK download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" MobinLauncher.apk \
+            --title "Mobin Launcher 1.0.${{ github.run_number }}" \
+            --notes "Automatic build from commit ${{ github.sha }}" \
+            --latest
