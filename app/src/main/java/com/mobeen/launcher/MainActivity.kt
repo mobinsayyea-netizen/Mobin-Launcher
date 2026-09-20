@@ -5,12 +5,15 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -31,17 +34,20 @@ import android.widget.ListView
 import android.widget.TextView
 
 data class AppEntry(val label: String, val pkg: String)
+data class HomeItem(val pkg: String, val col: Int, val row: Int)
 
 class MainActivity : Activity() {
 
     companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+        const val COLS = 4
     }
 
     private lateinit var prefs: SharedPreferences
     private lateinit var root: FrameLayout
-    private lateinit var homeLayer: FrameLayout
+    private lateinit var homeLayer: LinearLayout
+    private lateinit var homeArea: FrameLayout
     private lateinit var panel: LinearLayout
     private lateinit var searchBox: EditText
     private lateinit var listView: ListView
@@ -52,17 +58,20 @@ class MainActivity : Activity() {
     private var programmatic = false
     private var allApps: List<AppEntry> = emptyList()
     private var shown: List<AppEntry> = emptyList()
+    private var homeItems: MutableList<HomeItem> = ArrayList()
 
     // ---------------------------------------------------------------- lifecycle
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("launcher", Context.MODE_PRIVATE)
+        homeItems = loadHomeItems()
         buildUi()
         setContentView(root)
         loadApps()
         applyFilter()
         refreshFavorites()
+        homeArea.post { renderHome() }
 
         if (!LauncherUtil.isDefaultLauncher(this) && !prefs.getBoolean("asked_default", false)) {
             prefs.edit().putBoolean("asked_default", true).apply()
@@ -75,6 +84,7 @@ class MainActivity : Activity() {
         loadApps()
         applyFilter()
         refreshFavorites()
+        renderHome()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -123,26 +133,33 @@ class MainActivity : Activity() {
     private fun setupFavCell(c: Button) {
         c.setOnClickListener { (c.tag as? AppEntry)?.let { launch(it) } }
         c.setOnLongClickListener {
-            (c.tag as? AppEntry)?.let { showPositionDialog(it) }
+            (c.tag as? AppEntry)?.let { showAppMenu(it) }
             true
         }
-        attachEditAction(c) { c.tag as? AppEntry }
+        attachAppActions(c) { c.tag as? AppEntry }
     }
 
     private fun buildUi() {
         root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
 
-        // Home layer: empty screen + one row at the bottom. Empty area stays silent for TalkBack.
-        homeLayer = FrameLayout(this)
+        // Home layer: free area (home screen apps) + one row at the bottom.
+        // Empty places contain no view at all, so TalkBack stays silent there.
+        homeLayer = LinearLayout(this)
+        homeLayer.orientation = LinearLayout.VERTICAL
         homeLayer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         root.addView(homeLayer, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        // Row is right-to-left: first child is rightmost.
-        // Order of children: favorite 1, favorite 2, APPS, favorite 3, favorite 4
+        homeArea = FrameLayout(this)
+        homeArea.addOnLayoutChangeListener { _, l, t, r, b, oL, oT, oR, oB ->
+            if ((r - l) != (oR - oL) || (b - t) != (oB - oT)) homeArea.post { renderHome() }
+        }
+        homeLayer.addView(homeArea, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        // Row is left-to-right: favorite 1, favorite 2, APPS, favorite 3, favorite 4
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
-        row.layoutDirection = View.LAYOUT_DIRECTION_RTL
+        row.layoutDirection = View.LAYOUT_DIRECTION_LTR
         row.setPadding(dp(4), dp(4), dp(4), dp(8))
 
         val cells = ArrayList<Button>()
@@ -167,11 +184,11 @@ class MainActivity : Activity() {
             c.id = View.generateViewId()
             row.addView(c)
         }
-        // TalkBack swipe order = same as the child order (right to left)
+        // TalkBack swipe order = left to right
         for (k in 1 until cells.size) {
             cells[k].accessibilityTraversalAfter = cells[k - 1].id
         }
-        homeLayer.addView(row, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        homeLayer.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
 
         // App list panel
         panel = LinearLayout(this)
@@ -220,7 +237,7 @@ class MainActivity : Activity() {
             shown.getOrNull(pos)?.let { launch(it) }
         }
         listView.setOnItemLongClickListener { _, _, pos, _ ->
-            shown.getOrNull(pos)?.let { showPositionDialog(it) }
+            shown.getOrNull(pos)?.let { showAppMenu(it) }
             true
         }
         panel.addView(listView, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -280,6 +297,65 @@ class MainActivity : Activity() {
         }
         announceRunnable = r
         handler.postDelayed(r, 900)
+    }
+
+    // ---------------------------------------------------------------- long-press menu
+
+    private fun canUninstall(app: AppEntry): Boolean {
+        return try {
+            val ai = packageManager.getApplicationInfo(app.pkg, 0)
+            val isSystem = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            val isUpdatedSystem = (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+            !isSystem || isUpdatedSystem
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun openAppInfo(app: AppEntry) {
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}")))
+        } catch (e: Exception) {
+            announce("Cannot open app info for ${app.label}")
+        }
+    }
+
+    private fun uninstallApp(app: AppEntry) {
+        try {
+            startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}")))
+        } catch (e: Exception) {
+            announce("Cannot uninstall ${app.label}")
+        }
+    }
+
+    private fun showAppMenu(app: AppEntry) {
+        val labels = ArrayList<String>()
+        val actions = ArrayList<() -> Unit>()
+
+        labels.add("App info")
+        actions.add { openAppInfo(app) }
+
+        if (canUninstall(app)) {
+            labels.add("Uninstall")
+            actions.add { uninstallApp(app) }
+        }
+
+        if (isOnHome(app)) {
+            labels.add("Remove from home screen")
+            actions.add { removeFromHome(app) }
+        } else {
+            labels.add("Add to home screen")
+            actions.add { addToHome(app) }
+        }
+
+        labels.add("Edit app favorite position")
+        actions.add { showPositionDialog(app) }
+
+        AlertDialog.Builder(this)
+            .setTitle(app.label)
+            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ---------------------------------------------------------------- favorites
@@ -350,6 +426,98 @@ class MainActivity : Activity() {
         handler.postDelayed({ announce("${app.label} removed from favorites") }, 400)
     }
 
+    // ---------------------------------------------------------------- home screen apps
+
+    private fun loadHomeItems(): MutableList<HomeItem> {
+        val out = ArrayList<HomeItem>()
+        val raw = prefs.getString("home_items", "") ?: ""
+        for (line in raw.split("\n")) {
+            val p = line.split("|")
+            if (p.size == 3) {
+                val c = p[1].toIntOrNull()
+                val r = p[2].toIntOrNull()
+                if (c != null && r != null) out.add(HomeItem(p[0], c, r))
+            }
+        }
+        return out
+    }
+
+    private fun saveHome() {
+        val raw = homeItems.joinToString("\n") { "${it.pkg}|${it.col}|${it.row}" }
+        prefs.edit().putString("home_items", raw).apply()
+    }
+
+    private fun isOnHome(app: AppEntry): Boolean = homeItems.any { it.pkg == app.pkg }
+
+    private fun cellHeight(): Int = dp(76)
+
+    private fun homeRows(): Int {
+        val h = homeArea.height
+        return if (h <= 0) 6 else maxOf(1, h / cellHeight())
+    }
+
+    private fun renderHome() {
+        if (allApps.isNotEmpty()) {
+            val before = homeItems.size
+            homeItems.removeAll { h -> allApps.none { it.pkg == h.pkg } }
+            if (homeItems.size != before) saveHome()
+        }
+        homeArea.removeAllViews()
+        val w = homeArea.width
+        val h = homeArea.height
+        if (w <= 0 || h <= 0) return
+        val cellW = w / COLS
+        val cellH = cellHeight()
+        val rows = homeRows()
+        for (item in homeItems) {
+            val app = allApps.firstOrNull { it.pkg == item.pkg } ?: continue
+            if (item.row >= rows || item.col >= COLS) continue
+            val b = makeButton()
+            b.text = app.label
+            b.tag = app
+            b.setOnClickListener { launch(app) }
+            b.setOnLongClickListener {
+                showAppMenu(app)
+                true
+            }
+            attachAppActions(b) { app }
+            val lp = FrameLayout.LayoutParams(cellW - dp(6), cellH - dp(6))
+            lp.leftMargin = item.col * cellW + dp(3)
+            lp.topMargin = item.row * cellH + dp(3)
+            homeArea.addView(b, lp)
+        }
+    }
+
+    private fun addToHome(app: AppEntry) {
+        if (isOnHome(app)) {
+            announce("${app.label} is already on the home screen")
+            return
+        }
+        val rows = homeRows()
+        for (r in 0 until rows) {
+            for (c in 0 until COLS) {
+                if (homeItems.none { it.col == c && it.row == r }) {
+                    homeItems.add(HomeItem(app.pkg, c, r))
+                    saveHome()
+                    renderHome()
+                    adapter.notifyDataSetChanged()
+                    val msg = "${app.label} added to home screen, row ${r + 1}, column ${c + 1}"
+                    handler.postDelayed({ announce(msg) }, 400)
+                    return
+                }
+            }
+        }
+        handler.postDelayed({ announce("Home screen is full") }, 400)
+    }
+
+    private fun removeFromHome(app: AppEntry) {
+        homeItems.removeAll { it.pkg == app.pkg }
+        saveHome()
+        renderHome()
+        adapter.notifyDataSetChanged()
+        handler.postDelayed({ announce("${app.label} removed from home screen") }, 400)
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private fun launch(app: AppEntry) {
@@ -367,20 +535,40 @@ class MainActivity : Activity() {
         root.announceForAccessibility(msg)
     }
 
-    // TalkBack actions menu entry (same thing as long press)
-    private fun attachEditAction(v: View, provider: () -> AppEntry?) {
+    // The same menu as long press, but as direct TalkBack actions
+    private fun attachAppActions(v: View, provider: () -> AppEntry?) {
         v.setAccessibilityDelegate(object : View.AccessibilityDelegate() {
             override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                 super.onInitializeAccessibilityNodeInfo(host, info)
-                info.addAction(
-                    AccessibilityNodeInfo.AccessibilityAction(R.id.action_edit_fav, "Edit app favorite position")
-                )
+                val app = provider() ?: return
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_app_info, "App info"))
+                if (canUninstall(app)) {
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_uninstall, "Uninstall"))
+                }
+                val homeLabel = if (isOnHome(app)) "Remove from home screen" else "Add to home screen"
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_home, homeLabel))
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_fav, "Edit app favorite position"))
             }
 
             override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
-                if (action == R.id.action_edit_fav) {
-                    provider()?.let { showPositionDialog(it) }
-                    return true
+                val app = provider()
+                if (app != null) {
+                    if (action == R.id.action_app_info) {
+                        openAppInfo(app)
+                        return true
+                    }
+                    if (action == R.id.action_uninstall) {
+                        uninstallApp(app)
+                        return true
+                    }
+                    if (action == R.id.action_home) {
+                        if (isOnHome(app)) removeFromHome(app) else addToHome(app)
+                        return true
+                    }
+                    if (action == R.id.action_fav) {
+                        showPositionDialog(app)
+                        return true
+                    }
                 }
                 return super.performAccessibilityAction(host, action, args)
             }
@@ -404,9 +592,12 @@ class MainActivity : Activity() {
             }
             val app = shown[position]
             tv.text = app.label
+            val parts = ArrayList<String>()
             val fav = (1..4).firstOrNull { favPkg(it) == app.pkg }
-            tv.contentDescription = if (fav != null) "${app.label}, favorite position $fav" else null
-            attachEditAction(tv) { app }
+            if (fav != null) parts.add("favorite position $fav")
+            if (isOnHome(app)) parts.add("on home screen")
+            tv.contentDescription = if (parts.isEmpty()) null else app.label + ", " + parts.joinToString(", ")
+            attachAppActions(tv) { app }
             return tv
         }
     }
