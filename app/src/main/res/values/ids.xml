@@ -4,4 +4,6 @@
     <item name="action_uninstall" type="id" />
     <item name="action_home" type="id" />
     <item name="action_fav" type="id" />
+    <item name="action_select" type="id" />
+    <item name="action_edit_icon" type="id" />
 </resources>
