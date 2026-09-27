@@ -548,6 +548,8 @@ class MainActivity : Activity() {
         val labels = ArrayList<String>()
         val actions = ArrayList<() -> Unit>()
 
+        labels.add("Edit app favorite position")
+        actions.add { showPositionDialog(app) }
         if (isOnHome(app)) {
             labels.add("Remove from home")
             actions.add { removeFromHome(app) }
@@ -565,8 +567,6 @@ class MainActivity : Activity() {
         actions.add { openAppInfo(app) }
         labels.add("Edit Icon")
         actions.add { showEditIcon(app) }
-        labels.add("Edit app favorite position")
-        actions.add { showPositionDialog(app) }
 
         AlertDialog.Builder(this)
             .setTitle(app.label)
