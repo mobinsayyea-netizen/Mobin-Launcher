@@ -2,6 +2,8 @@ package com.mobeen.launcher
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipDescription
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -18,6 +20,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.view.DragEvent
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
@@ -59,6 +62,8 @@ class MainActivity : Activity() {
     private lateinit var appsBtn: Button
     private lateinit var gestureDetector: GestureDetector
     private val favCells = arrayOfNulls<Button>(4)
+    private var dragLastCol: Int = -999
+    private var dragLastRow: Int = -999
     private val rowCells = ArrayList<Button>()
     private val adapter = AppAdapter()
     private val handler = Handler(Looper.getMainLooper())
@@ -188,7 +193,7 @@ class MainActivity : Activity() {
     private fun setupFavCell(c: Button) {
         c.setOnClickListener { (c.tag as? AppEntry)?.let { launch(it) } }
         c.setOnLongClickListener {
-            (c.tag as? AppEntry)?.let { showAppMenu(it) }
+            (c.tag as? AppEntry)?.let { showAppMenu(it, c) }
             true
         }
         attachAppActions(c) { c.tag as? AppEntry }
@@ -212,6 +217,7 @@ class MainActivity : Activity() {
         val alp = LinearLayout.LayoutParams(MATCH, 0, 1f)
         alp.bottomMargin = dp(12)
         homeLayer.addView(homeArea, alp)
+        setupHomeAreaDragTarget()
 
         // Favorites row, left to right: favorite 1, favorite 2, APPS, favorite 3, favorite 4
         val row = LinearLayout(this)
@@ -321,8 +327,8 @@ class MainActivity : Activity() {
                 if (selectionMode) toggleSelect(app) else launch(app)
             }
         }
-        listView.setOnItemLongClickListener { _, _, pos, _ ->
-            shown.getOrNull(pos)?.let { showAppMenu(it) }
+        listView.setOnItemLongClickListener { _, view, pos, _ ->
+            shown.getOrNull(pos)?.let { showAppMenu(it, view) }
             true
         }
         panel.addView(listView, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -544,7 +550,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showAppMenu(app: AppEntry) {
+    private fun showAppMenu(app: AppEntry, sourceView: View) {
         val labels = ArrayList<String>()
         val actions = ArrayList<() -> Unit>()
 
@@ -557,6 +563,8 @@ class MainActivity : Activity() {
             labels.add("Add to home")
             actions.add { addToHome(app) }
         }
+        labels.add("Move to a new spot")
+        actions.add { startMove(app, sourceView) }
         if (canUninstall(app)) {
             labels.add("Uninstall")
             actions.add { uninstallApp(app) }
@@ -808,7 +816,7 @@ class MainActivity : Activity() {
                 b.tag = app
                 b.setOnClickListener { launch(app) }
                 b.setOnLongClickListener {
-                    showAppMenu(app)
+                    showAppMenu(app, b)
                     true
                 }
                 attachAppActions(b) { app }
@@ -927,6 +935,148 @@ class MainActivity : Activity() {
         renderHome()
         adapter.notifyDataSetChanged()
         handler.postDelayed({ announce("Folder ${f.name} created with ${a.label} and ${b.label}") }, 400)
+    }
+
+    // ---------------------------------------------------------------- drag to move / place
+
+    private fun startMove(app: AppEntry, view: View) {
+        dragLastCol = -999
+        dragLastRow = -999
+        val item = ClipData.Item(app.pkg)
+        val data = ClipData("move app", arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN), item)
+        val shadow = View.DragShadowBuilder(view)
+        val started = view.startDragAndDrop(data, shadow, app, 0)
+        if (panel.visibility == View.VISIBLE) closePanel(false)
+        if (started) {
+            handler.postDelayed({
+                announce("Moving ${app.label}. Drag one finger over the home screen and lift to place it, or let go outside it to cancel.")
+            }, 250)
+        } else {
+            announce("Could not start moving ${app.label}")
+        }
+    }
+
+    private fun setupHomeAreaDragTarget() {
+        homeArea.setOnDragListener { _, event ->
+            val app = event.localState as? AppEntry
+            when (event.action) {
+                DragEvent.ACTION_DRAG_STARTED -> app != null
+                DragEvent.ACTION_DRAG_ENTERED -> {
+                    dragLastCol = -999
+                    dragLastRow = -999
+                    true
+                }
+                DragEvent.ACTION_DRAG_LOCATION -> {
+                    if (app != null) announceDragCell(app, event.x, event.y)
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> {
+                    dragLastCol = -999
+                    dragLastRow = -999
+                    true
+                }
+                DragEvent.ACTION_DROP -> {
+                    if (app != null) {
+                        val (col, row) = cellFor(event.x, event.y)
+                        moveHomeItem(app, col, row)
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    if (!event.result && app != null) {
+                        handler.postDelayed({ announce("Move cancelled") }, 200)
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun cellFor(x: Float, y: Float): Pair<Int, Int> {
+        val w = homeArea.width
+        val cols = gridCols()
+        val rows = gridRows()
+        val cellW = if (cols > 0) w / cols else w
+        val cellH = cellHeightPx(rows)
+        val col = if (cellW > 0) (x / cellW).toInt() else 0
+        val row = if (cellH > 0) (y / cellH).toInt() else 0
+        return Pair(col, row)
+    }
+
+    private fun announceDragCell(app: AppEntry, x: Float, y: Float) {
+        val cols = gridCols()
+        val rows = gridRows()
+        val (col, row) = cellFor(x, y)
+        if (col == dragLastCol && row == dragLastRow) return
+        dragLastCol = col
+        dragLastRow = row
+        if (col < 0 || row < 0 || col >= cols || row >= rows) return
+        val occ = itemAt(col, row)
+        val what = when {
+            occ == null -> "empty"
+            occ.kind == "A" && occ.id == app.pkg -> "current spot"
+            else -> itemName(occ)
+        }
+        announce("Row ${row + 1}, column ${col + 1}, $what")
+    }
+
+    private fun moveHomeItem(app: AppEntry, col: Int, row: Int) {
+        val cols = gridCols()
+        val rows = gridRows()
+        val wasAt = homeItems.firstOrNull { it.kind == "A" && it.id == app.pkg }
+        if (col < 0 || row < 0 || col >= cols || row >= rows) {
+            handler.postDelayed({ announce("That is outside the grid. ${app.label} was not moved.") }, 300)
+            return
+        }
+        if (wasAt != null && wasAt.col == col && wasAt.row == row) {
+            handler.postDelayed({ announce("${app.label} stays at row ${row + 1}, column ${col + 1}") }, 300)
+            return
+        }
+        val occ = itemAt(col, row)
+        if (occ == null) {
+            if (wasAt != null) homeItems.remove(wasAt)
+            homeItems.add(HomeItem("A", app.pkg, col, row))
+            saveHome()
+            renderHome()
+            adapter.notifyDataSetChanged()
+            handler.postDelayed({ announce("${app.label} moved to row ${row + 1}, column ${col + 1}") }, 300)
+            return
+        }
+        if (!foldersOn()) {
+            handler.postDelayed({
+                announce("Row ${row + 1}, column ${col + 1} is used by ${itemName(occ)}. ${app.label} was not moved.")
+            }, 300)
+            return
+        }
+        if (occ.kind == "F") {
+            val f = folders[occ.id]
+            if (f != null) {
+                if (wasAt != null) homeItems.remove(wasAt)
+                f.pkgs.add(app.pkg)
+                saveHome()
+                saveFolders()
+                renderHome()
+                adapter.notifyDataSetChanged()
+                handler.postDelayed({ announce("${app.label} added to folder ${f.name}") }, 300)
+            }
+            return
+        }
+        val other = allApps.firstOrNull { it.pkg == occ.id }
+        if (other == null || other.pkg == app.pkg) {
+            if (wasAt != null) homeItems.remove(wasAt)
+            homeItems.remove(occ)
+            homeItems.add(HomeItem("A", app.pkg, col, row))
+            saveHome()
+            renderHome()
+            adapter.notifyDataSetChanged()
+            handler.postDelayed({ announce("${app.label} moved to row ${row + 1}, column ${col + 1}") }, 300)
+            return
+        }
+        textDialog("Create a folder", "Apps: ${other.label} and ${app.label}", "Folder", "Create") { name ->
+            if (wasAt != null) homeItems.remove(wasAt)
+            createFolder(name, other, app, col, row)
+        }
     }
 
     private fun removeFromHome(app: AppEntry) {
@@ -1050,6 +1200,7 @@ class MainActivity : Activity() {
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_app_info, "App info"))
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_edit_icon, "Edit Icon"))
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_fav, "Edit app favorite position"))
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.action_move, "Move to a new spot"))
             }
 
             override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
@@ -1077,6 +1228,10 @@ class MainActivity : Activity() {
                     }
                     if (action == R.id.action_fav) {
                         showPositionDialog(app)
+                        return true
+                    }
+                    if (action == R.id.action_move) {
+                        startMove(app, host)
                         return true
                     }
                 }
