@@ -64,6 +64,7 @@ class MainActivity : Activity() {
     private val favCells = arrayOfNulls<Button>(4)
     private var dragLastCol: Int = -999
     private var dragLastRow: Int = -999
+    private var dragSourceView: View? = null
     private val rowCells = ArrayList<Button>()
     private val adapter = AppAdapter()
     private val handler = Handler(Looper.getMainLooper())
@@ -193,7 +194,7 @@ class MainActivity : Activity() {
     private fun setupFavCell(c: Button) {
         c.setOnClickListener { (c.tag as? AppEntry)?.let { launch(it) } }
         c.setOnLongClickListener {
-            (c.tag as? AppEntry)?.let { showAppMenu(it, c) }
+            (c.tag as? AppEntry)?.let { startMove(it, c) }
             true
         }
         attachAppActions(c) { c.tag as? AppEntry }
@@ -328,7 +329,7 @@ class MainActivity : Activity() {
             }
         }
         listView.setOnItemLongClickListener { _, view, pos, _ ->
-            shown.getOrNull(pos)?.let { showAppMenu(it, view) }
+            shown.getOrNull(pos)?.let { startMove(it, view) }
             true
         }
         panel.addView(listView, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -816,7 +817,7 @@ class MainActivity : Activity() {
                 b.tag = app
                 b.setOnClickListener { launch(app) }
                 b.setOnLongClickListener {
-                    showAppMenu(app, b)
+                    startMove(app, b)
                     true
                 }
                 attachAppActions(b) { app }
@@ -942,6 +943,7 @@ class MainActivity : Activity() {
     private fun startMove(app: AppEntry, view: View) {
         dragLastCol = -999
         dragLastRow = -999
+        dragSourceView = view
         val item = ClipData.Item(app.pkg)
         val data = ClipData("move app", arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN), item)
         val shadow = View.DragShadowBuilder(view)
@@ -949,7 +951,7 @@ class MainActivity : Activity() {
         if (panel.visibility == View.VISIBLE) closePanel(false)
         if (started) {
             handler.postDelayed({
-                announce("Moving ${app.label}. Drag one finger over the home screen and lift to place it, or let go outside it to cancel.")
+                announce("Moving ${app.label}. Drag one finger over the home screen and lift to place it. Let go without moving to open its menu instead.")
             }, 250)
         } else {
             announce("Could not start moving ${app.label}")
@@ -984,7 +986,10 @@ class MainActivity : Activity() {
                 }
                 DragEvent.ACTION_DRAG_ENDED -> {
                     if (!event.result && app != null) {
-                        handler.postDelayed({ announce("Move cancelled") }, 200)
+                        val src = dragSourceView
+                        handler.postDelayed({
+                            if (src != null) showAppMenu(app, src) else announce("Move cancelled")
+                        }, 200)
                     }
                     true
                 }
